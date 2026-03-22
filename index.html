@@ -1,0 +1,2659 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>유림푸드 식권 관리 시스템 v3.0</title>
+<style>body{margin:0;padding:0;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script>
+const {
+  useState,
+  useMemo,
+  useCallback,
+  useRef,
+  useEffect
+} = React;
+
+/* ═══════════════════════════════════════════
+   유림푸드 식권 관리 시스템 v3.0
+   바코드/QR/NFC 연동 통합 시스템
+   SK하이닉스 용인사업장
+   ═══════════════════════════════════════════ */
+
+const REST = [{
+  id: "R1",
+  name: "한식당",
+  icon: "🍚",
+  color: "#D4A373"
+}, {
+  id: "R2",
+  name: "중식당",
+  icon: "🥢",
+  color: "#E63946"
+}, {
+  id: "R3",
+  name: "해장국",
+  icon: "🍲",
+  color: "#457B9D"
+}];
+const ST = {
+  UNUSED: "미사용",
+  USED: "사용완료",
+  EXPIRED: "소멸"
+};
+const USAGE = ["식사", "담배", "기호식품", "생활용품", "기타"];
+const TABS = [{
+  id: "dashboard",
+  label: "대시보드",
+  icon: "📊"
+}, {
+  id: "companies",
+  label: "고객사",
+  icon: "🏢"
+}, {
+  id: "workers",
+  label: "근로자",
+  icon: "👷"
+}, {
+  id: "issue",
+  label: "발권/출력",
+  icon: "🎫"
+}, {
+  id: "scanner",
+  label: "스캐너",
+  icon: "📡"
+}, {
+  id: "unused",
+  label: "미사용 관리",
+  icon: "📋"
+}, {
+  id: "billing",
+  label: "정산/청구",
+  icon: "💰"
+}];
+const TODAY = new Date().toISOString().slice(0, 10);
+function toD(s) {
+  return new Date(s + "T00:00:00");
+}
+function addM(d, m) {
+  const x = toD(d);
+  x.setMonth(x.getMonth() + m);
+  return x.toISOString().slice(0, 10);
+}
+function moOf(d) {
+  return d ? d.slice(0, 7) : "";
+}
+function dLeft(exp) {
+  return Math.max(0, Math.ceil((toD(exp) - toD(TODAY)) / 86400000));
+}
+
+// Barcode SVG generator (Code128-style visual)
+function genBarcodeSVG(code, w, h) {
+  let hash = 0;
+  for (let i = 0; i < code.length; i++) hash = (hash << 5) - hash + code.charCodeAt(i) | 0;
+  const seed = Math.abs(hash);
+  const bars = [];
+  let x = 4;
+  // Start pattern
+  const widths = [2, 1, 1, 3, 1, 2, 1, 1, 2, 3, 1, 1, 2, 1, 3, 1, 1, 2, 1, 1];
+  for (let i = 0; i < code.length * 2 + 10; i++) {
+    const bw = widths[(seed + i * 7) % widths.length];
+    if (i % 2 === 0) {
+      bars.push(`<rect x="${x}" y="0" width="${bw}" height="${h - 14}" fill="#000"/>`);
+    }
+    x += bw + 0.5;
+  }
+  const totalW = x + 4;
+  const scale = w / totalW;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
+    <g transform="scale(${scale},1)">${bars.join("")}</g>
+    <text x="${w / 2}" y="${h - 2}" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="9" fill="#000">${code}</text>
+  </svg>`;
+}
+
+// QR-style pattern generator
+function genQRSVG(code, size) {
+  let hash = 0;
+  for (let i = 0; i < code.length; i++) hash = (hash << 5) - hash + code.charCodeAt(i) | 0;
+  const seed = Math.abs(hash);
+  const grid = 15;
+  const cell = size / grid;
+  const rects = [];
+  // Corner patterns
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const offsets = [[0, 0], [0, grid - 3], [grid - 3, 0]];
+      offsets.forEach(([or, oc]) => {
+        if (r === 0 || r === 2 || c === 0 || c === 2 || r === 1 && c === 1) {
+          rects.push(`<rect x="${(oc + c) * cell}" y="${(or + r) * cell}" width="${cell}" height="${cell}" fill="#000"/>`);
+        }
+      });
+    }
+  }
+  // Data pattern
+  for (let r = 3; r < grid - 3; r++) {
+    for (let c = 3; c < grid - 3; c++) {
+      if ((seed * (r + 1) * (c + 1) + r * 13 + c * 7) % 3 !== 0) {
+        rects.push(`<rect x="${c * cell}" y="${r * cell}" width="${cell}" height="${cell}" fill="#000"/>`);
+      }
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">
+    <rect width="${size}" height="${size}" fill="#fff"/>${rects.join("")}</svg>`;
+}
+function RestChip({
+  id
+}) {
+  const r = REST.find(x => x.id === id);
+  if (!r) return /*#__PURE__*/React.createElement("span", null, "\u2014");
+  return /*#__PURE__*/React.createElement("span", {
+    className: "rc rc-" + id
+  }, r.icon, " ", r.name);
+}
+function ExpiryBar({
+  d
+}) {
+  const dl = dLeft(d);
+  const pct = Math.min(100, dl / 90 * 100);
+  const c = dl <= 14 ? "var(--err)" : dl <= 30 ? "var(--wrn)" : "var(--ok)";
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 3
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "eb"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "ef",
+    style: {
+      width: pct + "%",
+      background: c
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    className: "mf",
+    style: {
+      color: c,
+      fontSize: 10
+    }
+  }, "D-", dl));
+}
+function useToast() {
+  const [ts, setTs] = useState([]);
+  const add = useCallback((m, t) => {
+    const id = Date.now();
+    setTs(p => [...p, {
+      id,
+      m,
+      t: t || "ok"
+    }]);
+    setTimeout(() => setTs(p => p.filter(x => x.id !== id)), 3000);
+  }, []);
+  const el = /*#__PURE__*/React.createElement("div", {
+    className: "tst"
+  }, ts.map(t => /*#__PURE__*/React.createElement("div", {
+    key: t.id,
+    className: "ti ti-" + t.t
+  }, t.t === "ok" ? "✅" : t.t === "er" ? "❌" : "📡", " ", t.m)));
+  return [add, el];
+}
+
+// Generate ticket code: YF-YYMMDD-XXXX
+function ticketCode(seq) {
+  const d = TODAY.replace(/-/g, "").slice(2);
+  return "YF" + d + String(seq).padStart(5, "0");
+}
+const STYLES = `
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700;900&family=JetBrains+Mono:wght@400;600&display=swap');
+:root{
+  --bg0:#0B0D13;--bg1:#12141D;--bg2:#1A1D2B;--bg3:#222639;
+  --bd:#2A2E42;--bdl:#3A3F58;
+  --t1:#F0F1F4;--t2:#A0A5B8;--t3:#6C7190;
+  --acc:#F59E0B;--acc2:#FBBF24;--accs:rgba(245,158,11,.12);
+  --ok:#10B981;--oks:rgba(16,185,129,.12);
+  --err:#EF4444;--errs:rgba(239,68,68,.12);
+  --inf:#3B82F6;--infs:rgba(59,130,246,.12);
+  --wrn:#F97316;--wrns:rgba(249,115,22,.12);
+  --r:10px;--rs:6px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body,#root{font-family:'Noto Sans KR',sans-serif;background:var(--bg0);color:var(--t1);min-height:100vh}
+.app{display:flex;min-height:100vh}
+.sb{width:210px;background:var(--bg1);border-right:1px solid var(--bd);position:fixed;top:0;left:0;height:100vh;display:flex;flex-direction:column;z-index:100}
+.sb-b{padding:16px 18px 20px;border-bottom:1px solid var(--bd)}
+.sb-b h1{font-size:17px;font-weight:900;color:var(--acc);letter-spacing:-.5px}
+.sb-b small{font-size:9px;color:var(--t3);letter-spacing:1.5px;text-transform:uppercase;display:block;margin-top:3px}
+.sb-n{flex:1;padding:8px 0}
+.ni{display:flex;align-items:center;gap:9px;padding:9px 18px;cursor:pointer;font-size:13px;color:var(--t2);border-left:3px solid transparent;transition:all .15s}
+.ni:hover{background:var(--bg2);color:var(--t1)}
+.ni.on{background:var(--accs);color:var(--acc);font-weight:600;border-left-color:var(--acc)}
+.ni-i{font-size:15px;width:20px;text-align:center}
+.sb-f{padding:12px 18px;border-top:1px solid var(--bd);font-size:9px;color:var(--t3)}
+.mn{margin-left:210px;flex:1;padding:22px 26px;min-height:100vh}
+.ph{margin-bottom:22px}.ph h2{font-size:20px;font-weight:700}.ph p{font-size:12px;color:var(--t3);margin-top:3px}
+.phr{display:flex;justify-content:space-between;align-items:flex-start}
+.cd{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r);padding:18px;margin-bottom:14px}
+.ct{font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.7px;margin-bottom:10px}
+.sg{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:18px}
+.sc{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r);padding:16px;transition:all .15s;cursor:pointer}
+.sc:hover{border-color:var(--bdl);transform:translateY(-1px)}
+.sl{font-size:10px;font-weight:500;color:var(--t3);text-transform:uppercase;letter-spacing:.4px}
+.sv{font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:600;margin:4px 0 2px}
+.ss{font-size:10px;color:var(--t2)}
+.tw{overflow-x:auto;border-radius:var(--r)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:9px 12px;font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;background:var(--bg1);border-bottom:1px solid var(--bd);white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid var(--bd);color:var(--t2);white-space:nowrap}
+tr:hover td{background:var(--bg3)}
+.mf{font-family:'JetBrains Mono',monospace;font-size:12px}
+.bg{display:inline-flex;align-items:center;gap:3px;padding:2px 9px;border-radius:16px;font-size:10px;font-weight:600}
+.bg-ok{background:var(--oks);color:var(--ok)}.bg-er{background:var(--errs);color:var(--err)}
+.bg-ac{background:var(--accs);color:var(--acc)}.bg-mu{background:rgba(108,113,144,.15);color:var(--t3)}
+.bt{display:inline-flex;align-items:center;gap:5px;padding:7px 14px;border-radius:var(--rs);font-size:12px;font-weight:500;font-family:'Noto Sans KR',sans-serif;border:1px solid var(--bd);background:var(--bg2);color:var(--t1);cursor:pointer;transition:all .12s;white-space:nowrap}
+.bt:hover{background:var(--bg3);border-color:var(--bdl)}
+.bt-a{background:var(--acc);color:#000;border-color:var(--acc);font-weight:600}.bt-a:hover{background:var(--acc2)}
+.bt-ok{background:var(--ok);color:#fff;border-color:var(--ok)}
+.bt-er{background:var(--err);color:#fff;border-color:var(--err)}
+.bt-s{padding:4px 9px;font-size:11px}
+.ip{padding:8px 11px;border-radius:var(--rs);border:1px solid var(--bd);background:var(--bg1);color:var(--t1);font-family:'Noto Sans KR',sans-serif;font-size:13px;outline:none;transition:border .15s;width:100%}
+.ip:focus{border-color:var(--acc)}.ip::placeholder{color:var(--t3)}
+select.ip{cursor:pointer}
+.fb{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.rc{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:500}
+.rc-R1{background:rgba(212,163,115,.13);color:#D4A373}.rc-R2{background:rgba(230,57,70,.13);color:#E63946}.rc-R3{background:rgba(69,123,157,.13);color:#457B9D}
+.mb{display:flex;height:7px;border-radius:4px;overflow:hidden;background:var(--bg1);margin-top:6px}
+.mbs{height:100%}
+.mo{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:1000}
+.modal{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r);padding:24px;width:92%;max-width:520px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.modal h3{font-size:15px;font-weight:700;margin-bottom:18px}
+.fg{margin-bottom:12px}.fg label{display:block;font-size:11px;font-weight:500;color:var(--t3);margin-bottom:4px}
+.fr{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.fa{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.ig{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0}
+.rcd{border:2px solid var(--bd);border-radius:var(--r);padding:18px;text-align:center;cursor:pointer;transition:all .15s}
+.rcd:hover{border-color:var(--bdl);background:var(--bg3)}
+.rcd.sel{border-color:var(--acc);background:var(--accs)}
+.rcd .ri{font-size:32px}.rcd .rn{font-size:13px;font-weight:600;margin-top:6px}
+.wsl{max-height:280px;overflow-y:auto;border:1px solid var(--bd);border-radius:var(--rs)}
+.wsi{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid var(--bd);font-size:12px;cursor:pointer;transition:background .1s}
+.wsi:hover{background:var(--bg3)}.wsi.ck{background:var(--accs)}
+.chk{width:17px;height:17px;border:2px solid var(--bdl);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11px}
+.chk.on{background:var(--acc);border-color:var(--acc);color:#000}
+.isu{background:var(--bg1);border:1px solid var(--bd);border-radius:var(--r);padding:18px;margin-top:14px}
+.eb{width:70px;height:5px;background:var(--bg1);border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle;margin-right:5px}
+.ef{height:100%;border-radius:3px}
+.btt{font-family:'JetBrains Mono',monospace;font-size:30px;font-weight:600;color:var(--acc)}
+.bdi{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--bd);font-size:12px}.bdi:last-child{border-bottom:none}
+.sy{max-height:480px;overflow-y:auto}
+.em{text-align:center;padding:40px 16px;color:var(--t3)}.emi{font-size:36px;margin-bottom:10px}
+.tst{position:fixed;top:20px;right:20px;z-index:2000;display:flex;flex-direction:column;gap:8px}
+.ti{background:var(--bg3);border:1px solid var(--bdl);border-radius:var(--rs);padding:12px 18px;font-size:13px;display:flex;align-items:center;gap:8px;box-shadow:0 4px 20px rgba(0,0,0,.4);animation:si .3s}
+.ti-ok{border-left:3px solid var(--ok)}.ti-er{border-left:3px solid var(--err)}.ti-sc{border-left:3px solid var(--inf)}
+.acts{display:flex;gap:4px;flex-wrap:nowrap}
+@keyframes si{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes scanline{0%{top:0}100%{top:calc(100% - 2px)}}
+
+/* Scanner POS */
+.scan-wrap{display:grid;grid-template-columns:1fr 360px;gap:16px;align-items:start}
+.scan-pos{background:var(--bg2);border:2px solid var(--bd);border-radius:var(--r);padding:24px;position:sticky;top:22px}
+.scan-pos.active{border-color:var(--ok);box-shadow:0 0 20px rgba(16,185,129,.15)}
+.scan-input{font-family:'JetBrains Mono',monospace;font-size:20px;padding:14px 16px;background:var(--bg0);border:2px solid var(--bd);border-radius:var(--rs);color:var(--acc);width:100%;outline:none;text-align:center;letter-spacing:2px}
+.scan-input:focus{border-color:var(--acc);box-shadow:0 0 12px rgba(245,158,11,.2)}
+.scan-input::placeholder{color:var(--t3);font-size:14px;letter-spacing:0}
+.scan-status{text-align:center;padding:16px;border-radius:var(--rs);margin-top:12px;font-size:13px}
+.scan-ok{background:var(--oks);color:var(--ok);border:1px solid var(--ok)}
+.scan-er{background:var(--errs);color:var(--err);border:1px solid var(--err)}
+.scan-wait{background:rgba(59,130,246,.08);color:var(--inf);border:1px solid rgba(59,130,246,.3)}
+.scan-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px;animation:pulse 1.5s infinite}
+.scan-log{max-height:300px;overflow-y:auto;margin-top:14px}
+.scan-log-item{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--bd);font-size:12px}
+.scan-mode{display:flex;gap:6px;margin:12px 0}
+.scan-mode-btn{flex:1;padding:10px;border:1px solid var(--bd);border-radius:var(--rs);background:var(--bg1);color:var(--t2);cursor:pointer;text-align:center;font-size:11px;font-family:'Noto Sans KR',sans-serif;transition:all .15s}
+.scan-mode-btn:hover{background:var(--bg3)}
+.scan-mode-btn.on{background:var(--accs);border-color:var(--acc);color:var(--acc);font-weight:600}
+
+/* Label Print */
+.label-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:14px}
+.label-card{background:#fff;border-radius:6px;padding:12px;text-align:center;color:#000}
+.label-card .lbl-title{font-size:10px;font-weight:700;color:#333;margin-bottom:4px}
+.label-card .lbl-info{font-size:9px;color:#666;margin-top:4px}
+.label-card .lbl-code{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;margin-top:2px}
+
+/* NFC indicator */
+.nfc-ring{width:60px;height:60px;border-radius:50%;border:3px solid var(--inf);display:flex;align-items:center;justify-content:center;margin:12px auto;font-size:24px;animation:pulse 2s infinite}
+
+@media(max-width:860px){
+  .sb{width:56px}.sb .nl,.sb-b small,.sb-f{display:none}.sb-b{padding:10px}.sb-b h1{font-size:13px}
+  .ni{padding:11px;justify-content:center}.mn{margin-left:56px;padding:14px}
+  .sg{grid-template-columns:repeat(2,1fr)}.ig{grid-template-columns:1fr}
+  .scan-wrap{grid-template-columns:1fr}
+}
+
+@media print{
+  .sb,.ph,.fb,.bt,.scan-wrap,.tst,.ni,.sg,.scan-pos,.label-grid{display:none!important}
+  .mn{margin-left:0!important;padding:0!important}
+  .label-card{break-inside:avoid;border:1px solid #ccc;page-break-inside:avoid}
+  body,#root{background:#fff!important;color:#000!important}
+  .cd,.print-doc{background:#fff!important;border:none!important;color:#000!important;padding:20px!important}
+  table{color:#000!important}th{background:#f5f5f5!important;color:#333!important;border-bottom:2px solid #333!important}
+  td{color:#333!important;border-bottom:1px solid #ddd!important}
+  tr:hover td{background:transparent!important}
+  .mf{color:#000!important}.bg{border:1px solid #999!important;background:#eee!important;color:#333!important}
+  .bg-ok{background:#e6f7ef!important;color:#0a7c42!important;border-color:#0a7c42!important}
+  .bg-ac{background:#fff7e0!important;color:#b45309!important;border-color:#b45309!important}
+  .ct{color:#666!important}
+  .rc{background:#f0f0f0!important;color:#333!important}
+  .print-doc *{color-adjust:exact!important;-webkit-print-color-adjust:exact!important}
+}
+`;
+
+// ═══ MAIN APP ═══
+function App() {
+  const [tab, setTab] = useState("dashboard");
+  const [companies, setCompanies] = useState([]);
+  const [workers, setWorkers] = useState([]);
+  const [tickets, setTickets] = useState([]);
+  const [modal, setModal] = useState(null);
+  const [toast, toastEl] = useToast();
+  const [ticketSeq, setTicketSeq] = useState(1);
+  const cMap = useMemo(() => {
+    const m = {};
+    companies.forEach(c => {
+      m[c.id] = c;
+    });
+    return m;
+  }, [companies]);
+  const wMap = useMemo(() => {
+    const m = {};
+    workers.forEach(w => {
+      m[w.id] = w;
+    });
+    return m;
+  }, [workers]);
+  const tMap = useMemo(() => {
+    const m = {};
+    tickets.forEach(t => {
+      m[t.code] = t;
+    });
+    return m;
+  }, [tickets]);
+  const ctx = {
+    companies,
+    setCompanies,
+    workers,
+    setWorkers,
+    tickets,
+    setTickets,
+    cMap,
+    wMap,
+    tMap,
+    modal,
+    setModal,
+    toast,
+    ticketSeq,
+    setTicketSeq
+  };
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("style", null, STYLES), /*#__PURE__*/React.createElement("div", {
+    className: "app"
+  }, /*#__PURE__*/React.createElement("nav", {
+    className: "sb"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sb-b"
+  }, /*#__PURE__*/React.createElement("h1", null, "\uC720\uB9BC\uD478\uB4DC"), /*#__PURE__*/React.createElement("small", null, "SK\uD558\uC774\uB2C9\uC2A4 \uC6A9\uC778")), /*#__PURE__*/React.createElement("div", {
+    className: "sb-n"
+  }, TABS.map(t => /*#__PURE__*/React.createElement("div", {
+    key: t.id,
+    className: "ni" + (tab === t.id ? " on" : ""),
+    onClick: () => setTab(t.id)
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "ni-i"
+  }, t.icon), /*#__PURE__*/React.createElement("span", {
+    className: "nl"
+  }, t.label)))), /*#__PURE__*/React.createElement("div", {
+    className: "sb-f"
+  }, "v3.0 \uBC14\uCF54\uB4DC/QR/NFC \xB7 ", TODAY)), /*#__PURE__*/React.createElement("main", {
+    className: "mn"
+  }, tab === "dashboard" && /*#__PURE__*/React.createElement(Dashboard, ctx), tab === "companies" && /*#__PURE__*/React.createElement(Companies, ctx), tab === "workers" && /*#__PURE__*/React.createElement(Workers, ctx), tab === "issue" && /*#__PURE__*/React.createElement(Issue, ctx), tab === "scanner" && /*#__PURE__*/React.createElement(Scanner, ctx), tab === "unused" && /*#__PURE__*/React.createElement(Unused, ctx), tab === "billing" && /*#__PURE__*/React.createElement(Billing, ctx)), toastEl));
+}
+
+// ═══ 대시보드 ═══
+function Dashboard({
+  tickets,
+  companies,
+  workers,
+  cMap
+}) {
+  const tT = tickets.filter(t => t.issuedDate === TODAY);
+  const tI = tT.length,
+    tU = tT.filter(t => t.status === ST.USED).length;
+  const aU = tickets.filter(t => t.status === ST.UNUSED);
+  const aW = workers.filter(w => w.active).length;
+  const soon = aU.filter(t => dLeft(t.expiryDate) <= 14).length;
+  const cm = moOf(TODAY);
+  const byC = {};
+  companies.forEach(c => {
+    byC[c.id] = {
+      i: 0,
+      u: 0,
+      n: 0
+    };
+  });
+  tickets.filter(t => moOf(t.issuedDate) === cm).forEach(t => {
+    if (!byC[t.companyId]) return;
+    byC[t.companyId].i++;
+    t.status === ST.USED ? byC[t.companyId].u++ : byC[t.companyId].n++;
+  });
+  const byR = {
+    R1: 0,
+    R2: 0,
+    R3: 0
+  };
+  tickets.filter(t => t.status === ST.USED && moOf(t.usedDate) === cm).forEach(t => {
+    if (t.usedRestaurant) byR[t.usedRestaurant]++;
+  });
+  const mxR = Math.max(1, byR.R1, byR.R2, byR.R3);
+  if (companies.length === 0) {
+    return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      className: "ph"
+    }, /*#__PURE__*/React.createElement("h2", null, "\uB300\uC2DC\uBCF4\uB4DC"), /*#__PURE__*/React.createElement("p", null, TODAY, " \uAE30\uC900")), /*#__PURE__*/React.createElement("div", {
+      className: "em"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "emi"
+    }, "\uD83C\uDFD7\uFE0F"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 15,
+        fontWeight: 600,
+        marginBottom: 8
+      }
+    }, "\uC2DC\uC2A4\uD15C\uC744 \uC2DC\uC791\uD558\uC138\uC694!"), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 13,
+        lineHeight: 1.8
+      }
+    }, "1. ", /*#__PURE__*/React.createElement("b", null, "\uACE0\uAC1D\uC0AC"), " \u2192 \uACE0\uAC1D\uC0AC \uB4F1\uB85D", /*#__PURE__*/React.createElement("br", null), "2. ", /*#__PURE__*/React.createElement("b", null, "\uADFC\uB85C\uC790"), " \u2192 \uADFC\uB85C\uC790 \uB4F1\uB85D", /*#__PURE__*/React.createElement("br", null), "3. ", /*#__PURE__*/React.createElement("b", null, "\uBC1C\uAD8C/\uCD9C\uB825"), " \u2192 \uC2DD\uAD8C \uBC1C\uAD8C + \uBC14\uCF54\uB4DC \uB77C\uBCA8 \uCD9C\uB825", /*#__PURE__*/React.createElement("br", null), "4. ", /*#__PURE__*/React.createElement("b", null, "\uC2A4\uCE90\uB108"), " \u2192 \uC2DD\uB2F9\uC5D0\uC11C \uBC14\uCF54\uB4DC \uC2A4\uCE94\uC73C\uB85C \uC790\uB3D9 \uC0AC\uC6A9\uCC98\uB9AC")));
+  }
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ph"
+  }, /*#__PURE__*/React.createElement("h2", null, "\uB300\uC2DC\uBCF4\uB4DC"), /*#__PURE__*/React.createElement("p", null, TODAY, " \uAE30\uC900 \xB7 \uBC14\uCF54\uB4DC/QR/NFC \uC5F0\uB3D9 \uD604\uD669")), /*#__PURE__*/React.createElement("div", {
+    className: "sg"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sc"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sl"
+  }, "\uC624\uB298 \uBC1C\uAD8C"), /*#__PURE__*/React.createElement("div", {
+    className: "sv",
+    style: {
+      color: "var(--acc)"
+    }
+  }, tI), /*#__PURE__*/React.createElement("div", {
+    className: "ss"
+  }, Math.floor(tI / 3), "\uBA85")), /*#__PURE__*/React.createElement("div", {
+    className: "sc"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sl"
+  }, "\uC624\uB298 \uC2A4\uCE94(\uC0AC\uC6A9)"), /*#__PURE__*/React.createElement("div", {
+    className: "sv",
+    style: {
+      color: "var(--ok)"
+    }
+  }, tU), /*#__PURE__*/React.createElement("div", {
+    className: "ss"
+  }, "\uC0AC\uC6A9\uB960 ", tI ? Math.round(tU / tI * 100) : 0, "%")), /*#__PURE__*/React.createElement("div", {
+    className: "sc"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sl"
+  }, "\uC804\uCCB4 \uBBF8\uC0AC\uC6A9"), /*#__PURE__*/React.createElement("div", {
+    className: "sv",
+    style: {
+      color: "var(--inf)"
+    }
+  }, aU.length), /*#__PURE__*/React.createElement("div", {
+    className: "ss"
+  }, "\uB9CC\uB8CC\uC784\uBC15 ", soon, "\uC7A5")), /*#__PURE__*/React.createElement("div", {
+    className: "sc"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sl"
+  }, "\uD65C\uC131 \uADFC\uB85C\uC790"), /*#__PURE__*/React.createElement("div", {
+    className: "sv"
+  }, aW), /*#__PURE__*/React.createElement("div", {
+    className: "ss"
+  }, companies.filter(c => c.active).length, "\uAC1C \uACE0\uAC1D\uC0AC"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ct"
+  }, "\uC774\uBC88 \uB2EC \uACE0\uAC1D\uC0AC\uBCC4"), companies.filter(c => c.active).map(c => {
+    const d = byC[c.id] || {
+      i: 0,
+      u: 0,
+      n: 0
+    };
+    const tot = d.i || 1;
+    return /*#__PURE__*/React.createElement("div", {
+      key: c.id,
+      style: {
+        marginBottom: 12
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        fontSize: 12
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontWeight: 600
+      }
+    }, c.name), /*#__PURE__*/React.createElement("span", {
+      className: "mf",
+      style: {
+        color: "var(--t3)"
+      }
+    }, d.i, "\uC7A5")), /*#__PURE__*/React.createElement("div", {
+      className: "mb"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "mbs",
+      style: {
+        width: d.u / tot * 100 + "%",
+        background: "var(--ok)"
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "mbs",
+      style: {
+        width: d.n / tot * 100 + "%",
+        background: "var(--acc)"
+      }
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        marginTop: 3,
+        fontSize: 10,
+        color: "var(--t3)"
+      }
+    }, /*#__PURE__*/React.createElement("span", null, "\uC2A4\uCE94 ", d.u), /*#__PURE__*/React.createElement("span", null, "\uBBF8\uC0AC\uC6A9 ", d.n)));
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "cd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ct"
+  }, "\uC774\uBC88 \uB2EC \uC2DD\uB2F9\uBCC4 \uC2A4\uCE94"), REST.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 7,
+      marginBottom: 5
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 18
+    }
+  }, r.icon), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 600,
+      fontSize: 12
+    }
+  }, r.name), /*#__PURE__*/React.createElement("span", {
+    className: "mf",
+    style: {
+      marginLeft: "auto",
+      color: r.color
+    }
+  }, byR[r.id])), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 7,
+      background: "var(--bg1)",
+      borderRadius: 4,
+      overflow: "hidden"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: "100%",
+      width: byR[r.id] / mxR * 100 + "%",
+      background: r.color,
+      borderRadius: 4
+    }
+  })))))));
+}
+
+// ═══ 고객사 ═══
+function Companies({
+  companies,
+  setCompanies,
+  workers,
+  modal,
+  setModal,
+  toast
+}) {
+  const ef = {
+    name: "",
+    contact: "",
+    phone: "",
+    pricePerMeal: "8500",
+    contractStart: TODAY
+  };
+  const [form, setForm] = useState(ef);
+  const [editId, setEditId] = useState(null);
+  function openAdd() {
+    setForm(ef);
+    setEditId(null);
+    setModal("co");
+  }
+  function openEdit(c) {
+    setForm({
+      name: c.name,
+      contact: c.contact,
+      phone: c.phone,
+      pricePerMeal: String(c.pricePerMeal),
+      contractStart: c.contractStart
+    });
+    setEditId(c.id);
+    setModal("co");
+  }
+  function save() {
+    if (!form.name.trim()) {
+      toast("고객사명을 입력하세요", "er");
+      return;
+    }
+    if (!form.contact.trim()) {
+      toast("담당자를 입력하세요", "er");
+      return;
+    }
+    if (editId) {
+      setCompanies(companies.map(c => c.id === editId ? {
+        ...c,
+        name: form.name.trim(),
+        contact: form.contact.trim(),
+        phone: form.phone.trim(),
+        pricePerMeal: Number(form.pricePerMeal) || 8500,
+        contractStart: form.contractStart
+      } : c));
+      toast(form.name + " 수정 완료");
+    } else {
+      const id = "C" + String(companies.length + 1).padStart(3, "0");
+      setCompanies([...companies, {
+        id,
+        name: form.name.trim(),
+        contact: form.contact.trim(),
+        phone: form.phone.trim(),
+        pricePerMeal: Number(form.pricePerMeal) || 8500,
+        active: true,
+        contractStart: form.contractStart
+      }]);
+      toast(form.name + " 등록 완료");
+    }
+    setModal(null);
+  }
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ph phr"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", null, "\uACE0\uAC1D\uC0AC \uAD00\uB9AC"), /*#__PURE__*/React.createElement("p", null, "\uB4F1\uB85D ", companies.length, "\uAC1C")), /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-a",
+    onClick: openAdd
+  }, "+ \uACE0\uAC1D\uC0AC \uB4F1\uB85D")), companies.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "em"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "emi"
+  }, "\uD83C\uDFE2"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13
+    }
+  }, "\uB4F1\uB85D\uB41C \uACE0\uAC1D\uC0AC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.", /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("b", null, "+ \uACE0\uAC1D\uC0AC \uB4F1\uB85D"), " \uBC84\uD2BC\uC744 \uB20C\uB7EC \uC2DC\uC791\uD558\uC138\uC694.")) : /*#__PURE__*/React.createElement("div", {
+    className: "cd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tw"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "ID"), /*#__PURE__*/React.createElement("th", null, "\uACE0\uAC1D\uC0AC\uBA85"), /*#__PURE__*/React.createElement("th", null, "\uB2F4\uB2F9\uC790"), /*#__PURE__*/React.createElement("th", null, "\uC5F0\uB77D\uCC98"), /*#__PURE__*/React.createElement("th", null, "\uC2DD\uB2E8\uAC00"), /*#__PURE__*/React.createElement("th", null, "\uADFC\uB85C\uC790"), /*#__PURE__*/React.createElement("th", null, "\uC0C1\uD0DC"), /*#__PURE__*/React.createElement("th", null, "\uAD00\uB9AC"))), /*#__PURE__*/React.createElement("tbody", null, companies.map(c => /*#__PURE__*/React.createElement("tr", {
+    key: c.id
+  }, /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, c.id), /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 600,
+      color: "var(--t1)"
+    }
+  }, c.name), /*#__PURE__*/React.createElement("td", null, c.contact), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, c.phone), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, Number(c.pricePerMeal).toLocaleString(), "\uC6D0"), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, workers.filter(w => w.companyId === c.id && w.active).length, "\uBA85"), /*#__PURE__*/React.createElement("td", null, c.active ? /*#__PURE__*/React.createElement("span", {
+    className: "bg bg-ok"
+  }, "\uD65C\uC131") : /*#__PURE__*/React.createElement("span", {
+    className: "bg bg-mu"
+  }, "\uBE44\uD65C\uC131")), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", {
+    className: "acts"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-s",
+    onClick: () => openEdit(c)
+  }, "\uC218\uC815"), /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-s " + (c.active ? "bt-er" : "bt-ok"),
+    onClick: () => {
+      setCompanies(companies.map(x => x.id === c.id ? {
+        ...x,
+        active: !x.active
+      } : x));
+      toast(c.name + " 상태 변경");
+    }
+  }, c.active ? "비활성" : "활성"))))))))), modal === "co" && /*#__PURE__*/React.createElement("div", {
+    className: "mo",
+    onClick: () => setModal(null)
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("h3", null, editId ? "🏢 고객사 수정" : "🏢 새 고객사 등록"), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "\uACE0\uAC1D\uC0AC\uBA85 *"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    value: form.name,
+    onChange: e => setForm({
+      ...form,
+      name: e.target.value
+    }),
+    placeholder: "\uC608: \uC0BC\uC601\uAC74\uC124"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "fr"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "\uB2F4\uB2F9\uC790 *"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    value: form.contact,
+    onChange: e => setForm({
+      ...form,
+      contact: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "\uC5F0\uB77D\uCC98"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    value: form.phone,
+    onChange: e => setForm({
+      ...form,
+      phone: e.target.value
+    }),
+    placeholder: "010-0000-0000"
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "fr"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "\uC2DD\uB2E8\uAC00 (\uC6D0)"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    type: "number",
+    value: form.pricePerMeal,
+    onChange: e => setForm({
+      ...form,
+      pricePerMeal: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "\uACC4\uC57D\uC2DC\uC791\uC77C"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    type: "date",
+    value: form.contractStart,
+    onChange: e => setForm({
+      ...form,
+      contractStart: e.target.value
+    })
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "fa"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "bt",
+    onClick: () => setModal(null)
+  }, "\uCDE8\uC18C"), /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-a",
+    onClick: save
+  }, editId ? "수정" : "등록")))));
+}
+
+// ═══ 근로자 ═══
+function Workers({
+  workers,
+  setWorkers,
+  cMap,
+  companies,
+  modal,
+  setModal,
+  toast
+}) {
+  const [filter, setFilter] = useState({
+    company: "",
+    search: ""
+  });
+  const ef = {
+    name: "",
+    companyId: "",
+    phone: "",
+    entryDate: TODAY
+  };
+  const [form, setForm] = useState(ef);
+  const [editId, setEditId] = useState(null);
+  const filtered = workers.filter(w => {
+    if (filter.company && w.companyId !== filter.company) return false;
+    if (filter.search && !w.name.includes(filter.search) && !w.id.toLowerCase().includes(filter.search.toLowerCase())) return false;
+    return true;
+  });
+  function save() {
+    if (!form.name.trim()) {
+      toast("이름을 입력하세요", "er");
+      return;
+    }
+    if (!form.companyId) {
+      toast("소속 고객사를 선택하세요", "er");
+      return;
+    }
+    if (editId) {
+      setWorkers(workers.map(w => w.id === editId ? {
+        ...w,
+        name: form.name.trim(),
+        companyId: form.companyId,
+        phone: form.phone.trim(),
+        entryDate: form.entryDate
+      } : w));
+      toast(form.name + " 수정 완료");
+    } else {
+      const id = "W" + String(workers.length + 1).padStart(4, "0");
+      setWorkers([...workers, {
+        id,
+        name: form.name.trim(),
+        companyId: form.companyId,
+        phone: form.phone.trim(),
+        entryDate: form.entryDate,
+        exitDate: null,
+        active: true
+      }]);
+      toast(form.name + " 등록 완료");
+    }
+    setModal(null);
+  }
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ph phr"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", null, "\uADFC\uB85C\uC790 \uAD00\uB9AC"), /*#__PURE__*/React.createElement("p", null, "\uC804\uCCB4 ", workers.length, "\uBA85 \xB7 \uD65C\uC131 ", workers.filter(w => w.active).length, "\uBA85")), /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-a",
+    onClick: () => {
+      setForm(ef);
+      setEditId(null);
+      setModal("wk");
+    }
+  }, "+ \uADFC\uB85C\uC790 \uB4F1\uB85D")), /*#__PURE__*/React.createElement("div", {
+    className: "fb"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "ip",
+    style: {
+      width: 140
+    },
+    value: filter.company,
+    onChange: e => setFilter({
+      ...filter,
+      company: e.target.value
+    })
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\uC804\uCCB4 \uACE0\uAC1D\uC0AC"), companies.map(c => /*#__PURE__*/React.createElement("option", {
+    key: c.id,
+    value: c.id
+  }, c.name))), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    style: {
+      width: 180
+    },
+    placeholder: "\uC774\uB984 \uB610\uB294 ID \uAC80\uC0C9",
+    value: filter.search,
+    onChange: e => setFilter({
+      ...filter,
+      search: e.target.value
+    })
+  })), workers.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    className: "em"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "emi"
+  }, "\uD83D\uDC77"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13
+    }
+  }, "\uB4F1\uB85D\uB41C \uADFC\uB85C\uC790\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.", companies.length === 0 ? /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("br", null), "\uBA3C\uC800 \uACE0\uAC1D\uC0AC\uB97C \uB4F1\uB85D\uD574\uC8FC\uC138\uC694.") : /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("b", null, "+ \uADFC\uB85C\uC790 \uB4F1\uB85D"), " \uBC84\uD2BC\uC73C\uB85C \uC2DC\uC791\uD558\uC138\uC694."))) : /*#__PURE__*/React.createElement("div", {
+    className: "cd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tw sy"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "ID"), /*#__PURE__*/React.createElement("th", null, "\uC774\uB984"), /*#__PURE__*/React.createElement("th", null, "\uC18C\uC18D"), /*#__PURE__*/React.createElement("th", null, "\uC5F0\uB77D\uCC98"), /*#__PURE__*/React.createElement("th", null, "\uC785\uC7A5\uC77C"), /*#__PURE__*/React.createElement("th", null, "\uC0C1\uD0DC"), /*#__PURE__*/React.createElement("th", null, "\uAD00\uB9AC"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map(w => /*#__PURE__*/React.createElement("tr", {
+    key: w.id
+  }, /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, w.id), /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 600,
+      color: "var(--t1)"
+    }
+  }, w.name), /*#__PURE__*/React.createElement("td", null, cMap[w.companyId] ? cMap[w.companyId].name : "—"), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, w.phone || "—"), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, w.entryDate), /*#__PURE__*/React.createElement("td", null, w.active ? /*#__PURE__*/React.createElement("span", {
+    className: "bg bg-ok"
+  }, "\uC7AC\uC9C1") : /*#__PURE__*/React.createElement("span", {
+    className: "bg bg-mu"
+  }, "\uD1F4\uC7A5")), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", {
+    className: "acts"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-s",
+    onClick: () => {
+      setForm({
+        name: w.name,
+        companyId: w.companyId,
+        phone: w.phone,
+        entryDate: w.entryDate
+      });
+      setEditId(w.id);
+      setModal("wk");
+    }
+  }, "\uC218\uC815"), /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-s",
+    onClick: () => {
+      setWorkers(workers.map(x => x.id === w.id ? {
+        ...x,
+        active: !x.active,
+        exitDate: x.active ? TODAY : null
+      } : x));
+      toast(w.name + (w.active ? " 퇴장" : " 복귀"));
+    }
+  }, w.active ? "퇴장" : "복귀"))))))))), modal === "wk" && /*#__PURE__*/React.createElement("div", {
+    className: "mo",
+    onClick: () => setModal(null)
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("h3", null, editId ? "👷 근로자 수정" : "👷 새 근로자 등록"), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "\uC774\uB984 *"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    value: form.name,
+    onChange: e => setForm({
+      ...form,
+      name: e.target.value
+    }),
+    placeholder: "\uADFC\uB85C\uC790 \uC774\uB984"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "\uC18C\uC18D \uACE0\uAC1D\uC0AC *"), /*#__PURE__*/React.createElement("select", {
+    className: "ip",
+    value: form.companyId,
+    onChange: e => setForm({
+      ...form,
+      companyId: e.target.value
+    })
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\uACE0\uAC1D\uC0AC \uC120\uD0DD"), companies.filter(c => c.active).map(c => /*#__PURE__*/React.createElement("option", {
+    key: c.id,
+    value: c.id
+  }, c.name)))), /*#__PURE__*/React.createElement("div", {
+    className: "fr"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "\uC5F0\uB77D\uCC98"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    value: form.phone,
+    onChange: e => setForm({
+      ...form,
+      phone: e.target.value
+    }),
+    placeholder: "010-0000-0000"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "fg"
+  }, /*#__PURE__*/React.createElement("label", null, "\uC785\uC7A5\uC77C"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    type: "date",
+    value: form.entryDate,
+    onChange: e => setForm({
+      ...form,
+      entryDate: e.target.value
+    })
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "fa"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "bt",
+    onClick: () => setModal(null)
+  }, "\uCDE8\uC18C"), /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-a",
+    onClick: save
+  }, editId ? "수정" : "등록")))));
+}
+
+// ═══ 발권/출력 (바코드 라벨 생성) ═══
+function Issue({
+  workers,
+  companies,
+  cMap,
+  tickets,
+  setTickets,
+  toast,
+  ticketSeq,
+  setTicketSeq
+}) {
+  const [rest, setRest] = useState(null);
+  const [comp, setComp] = useState("");
+  const [sel, setSel] = useState(new Set());
+  const [iDate, setIDate] = useState(TODAY);
+  const [lastIssued, setLastIssued] = useState([]);
+  const [showLabels, setShowLabels] = useState(false);
+  const activeW = workers.filter(w => w.active);
+  const eligible = activeW.filter(w => {
+    if (comp && w.companyId !== comp) return false;
+    return !tickets.some(t => t.workerId === w.id && t.issuedDate === iDate);
+  });
+  const already = activeW.filter(w => tickets.some(t => t.workerId === w.id && t.issuedDate === iDate));
+  function toggleW(id) {
+    setSel(p => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id);else n.add(id);
+      return n;
+    });
+  }
+  function selAll() {
+    sel.size === eligible.length && eligible.length > 0 ? setSel(new Set()) : setSel(new Set(eligible.map(w => w.id)));
+  }
+  function doIssue() {
+    if (!rest) {
+      toast("발권 식당을 선택하세요", "er");
+      return;
+    }
+    if (sel.size === 0) {
+      toast("근로자를 선택하세요", "er");
+      return;
+    }
+    const newT = [];
+    let seq = ticketSeq;
+    sel.forEach(wId => {
+      const w = workers.find(x => x.id === wId);
+      if (!w) return;
+      for (let t = 0; t < 3; t++) {
+        const code = ticketCode(seq);
+        newT.push({
+          id: "T" + String(seq).padStart(6, "0"),
+          code: code,
+          workerId: wId,
+          companyId: w.companyId,
+          issuedDate: iDate,
+          issuedRestaurant: rest,
+          expiryDate: addM(iDate, 3),
+          status: ST.UNUSED,
+          usedDate: null,
+          usedRestaurant: null,
+          usedFor: null,
+          ticketNo: t + 1,
+          scanMethod: null
+        });
+        seq++;
+      }
+    });
+    setTicketSeq(seq);
+    setTickets([...tickets, ...newT]);
+    setLastIssued(newT);
+    setShowLabels(true);
+    toast(sel.size + "명 × 3장 = " + sel.size * 3 + "장 발권 완료 — 라벨 출력 준비됨");
+    setSel(new Set());
+  }
+  if (activeW.length === 0) {
+    return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      className: "ph"
+    }, /*#__PURE__*/React.createElement("h2", null, "\uBC1C\uAD8C / \uCD9C\uB825"), /*#__PURE__*/React.createElement("p", null, "\uBC14\uCF54\uB4DC \uB77C\uBCA8 \uD504\uB9B0\uD130 \uC5F0\uB3D9")), /*#__PURE__*/React.createElement("div", {
+      className: "em"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "emi"
+    }, "\uD83C\uDFAB"), /*#__PURE__*/React.createElement("p", {
+      style: {
+        fontSize: 13
+      }
+    }, "\uD65C\uC131 \uADFC\uB85C\uC790\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.", /*#__PURE__*/React.createElement("br", null), "\uBA3C\uC800 \uADFC\uB85C\uC790\uB97C \uB4F1\uB85D\uD574\uC8FC\uC138\uC694.")));
+  }
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ph"
+  }, /*#__PURE__*/React.createElement("h2", null, "\uBC1C\uAD8C / \uCD9C\uB825"), /*#__PURE__*/React.createElement("p", null, iDate, " \xB7 1\uC778 3\uC7A5 \xB7 \uC720\uD6A8\uAE30\uAC04 3\uAC1C\uC6D4 \xB7 \uBC14\uCF54\uB4DC \uB77C\uBCA8 \uC790\uB3D9 \uC0DD\uC131")), showLabels && lastIssued.length > 0 ? /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "fb"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-a",
+    onClick: () => window.print()
+  }, "\uD83D\uDDA8\uFE0F \uB77C\uBCA8 \uD504\uB9B0\uD130 \uCD9C\uB825"), /*#__PURE__*/React.createElement("button", {
+    className: "bt",
+    onClick: () => setShowLabels(false)
+  }, "\u2190 \uBC1C\uAD8C \uD654\uBA74\uC73C\uB85C"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: "var(--t3)"
+    }
+  }, lastIssued.length, "\uC7A5 \uCD9C\uB825 \uB300\uAE30")), /*#__PURE__*/React.createElement("div", {
+    className: "label-grid"
+  }, lastIssued.map(t => {
+    const w = workers.find(x => x.id === t.workerId);
+    return /*#__PURE__*/React.createElement("div", {
+      key: t.id,
+      className: "label-card"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "lbl-title"
+    }, "\uC720\uB9BC\uD478\uB4DC \uC2DD\uAD8C"), /*#__PURE__*/React.createElement("div", {
+      dangerouslySetInnerHTML: {
+        __html: genBarcodeSVG(t.code, 200, 50)
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "lbl-code"
+    }, t.code), /*#__PURE__*/React.createElement("div", {
+      className: "lbl-info"
+    }, w ? w.name : "", " \xB7 ", cMap[t.companyId] ? cMap[t.companyId].name : "", " \xB7 ", t.ticketNo, "/3"), /*#__PURE__*/React.createElement("div", {
+      className: "lbl-info"
+    }, "\uBC1C\uAD8C: ", t.issuedDate, " \xB7 \uB9CC\uB8CC: ", t.expiryDate), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 6
+      },
+      dangerouslySetInnerHTML: {
+        __html: genQRSVG(t.code, 50)
+      }
+    }));
+  }))) : /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "cd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ct"
+  }, "\u2460 \uBC1C\uAD8C\uC77C \uBC0F \uC2DD\uB2F9 \uC120\uD0DD"), /*#__PURE__*/React.createElement("div", {
+    className: "fb"
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: 12,
+      color: "var(--t3)"
+    }
+  }, "\uBC1C\uAD8C\uC77C:"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    type: "date",
+    style: {
+      width: 160
+    },
+    value: iDate,
+    onChange: e => {
+      setIDate(e.target.value);
+      setSel(new Set());
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "ig"
+  }, REST.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    className: "rcd" + (rest === r.id ? " sel" : ""),
+    onClick: () => setRest(r.id)
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ri"
+  }, r.icon), /*#__PURE__*/React.createElement("div", {
+    className: "rn"
+  }, r.name))))), /*#__PURE__*/React.createElement("div", {
+    className: "cd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ct"
+  }, "\u2461 \uBC1C\uAD8C \uB300\uC0C1 \uC120\uD0DD"), /*#__PURE__*/React.createElement("div", {
+    className: "fb"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "ip",
+    style: {
+      width: 140
+    },
+    value: comp,
+    onChange: e => {
+      setComp(e.target.value);
+      setSel(new Set());
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\uC804\uCCB4 \uACE0\uAC1D\uC0AC"), companies.filter(c => c.active).map(c => /*#__PURE__*/React.createElement("option", {
+    key: c.id,
+    value: c.id
+  }, c.name))), /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-s",
+    onClick: selAll
+  }, sel.size === eligible.length && eligible.length > 0 ? "전체 해제" : "전체 선택"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: "var(--t3)"
+    }
+  }, "\uBBF8\uBC1C\uAD8C ", eligible.length, "\uBA85 \xB7 \uBC1C\uAD8C\uC644\uB8CC ", already.length, "\uBA85")), /*#__PURE__*/React.createElement("div", {
+    className: "wsl"
+  }, eligible.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 20,
+      textAlign: "center",
+      color: "var(--t3)",
+      fontSize: 12
+    }
+  }, "\uBAA8\uB4E0 \uADFC\uB85C\uC790\uAC00 \uC774\uBBF8 \uBC1C\uAD8C\uB418\uC5C8\uC2B5\uB2C8\uB2E4") : eligible.map(w => /*#__PURE__*/React.createElement("div", {
+    key: w.id,
+    className: "wsi" + (sel.has(w.id) ? " ck" : ""),
+    onClick: () => toggleW(w.id)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "chk" + (sel.has(w.id) ? " on" : "")
+  }, sel.has(w.id) ? "✓" : ""), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 500,
+      color: "var(--t1)"
+    }
+  }, w.name), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 10,
+      color: "var(--t3)"
+    }
+  }, cMap[w.companyId] ? cMap[w.companyId].name : "")), /*#__PURE__*/React.createElement("span", {
+    className: "mf",
+    style: {
+      fontSize: 10,
+      color: "var(--t3)"
+    }
+  }, w.id))))), sel.size > 0 && rest && /*#__PURE__*/React.createElement("div", {
+    className: "isu"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600
+    }
+  }, "\uD83C\uDFAB \uBC1C\uAD8C \uD655\uC778"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--t2)",
+      marginTop: 3
+    }
+  }, /*#__PURE__*/React.createElement(RestChip, {
+    id: rest
+  }), " \uC5D0\uC11C ", /*#__PURE__*/React.createElement("b", null, sel.size), "\uBA85 \xD7 3\uC7A5 = ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: "var(--acc)"
+    }
+  }, sel.size * 3, "\uC7A5")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--t3)",
+      marginTop: 2
+    }
+  }, "\uC720\uD6A8\uAE30\uAC04: ", iDate, " ~ ", addM(iDate, 3), " \xB7 \uBC14\uCF54\uB4DC \uB77C\uBCA8 \uC790\uB3D9 \uC0DD\uC131")), /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-a",
+    style: {
+      fontSize: 14,
+      padding: "10px 24px"
+    },
+    onClick: doIssue
+  }, "\uD83C\uDFAB \uBC1C\uAD8C + \uB77C\uBCA8 \uC0DD\uC131"))), lastIssued.length > 0 && !showLabels && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "bt",
+    onClick: () => setShowLabels(true)
+  }, "\uD83D\uDDA8\uFE0F \uCD5C\uADFC \uBC1C\uAD8C \uB77C\uBCA8 \uBCF4\uAE30 (", lastIssued.length, "\uC7A5)"))));
+}
+
+// ═══ 스캐너 (POS 인터페이스) ═══
+function Scanner({
+  tickets,
+  setTickets,
+  wMap,
+  cMap,
+  toast
+}) {
+  const [scanRest, setScanRest] = useState("R1");
+  const [scanMode, setScanMode] = useState("barcode");
+  const [scanInput, setScanInput] = useState("");
+  const [scanResult, setScanResult] = useState(null);
+  const [usageType, setUsageType] = useState("식사");
+  const [scanLog, setScanLog] = useState([]);
+  const inputRef = useRef(null);
+  useEffect(() => {
+    if (inputRef.current && scanMode === "barcode") inputRef.current.focus();
+  }, [scanMode, scanRest]);
+  function processScan(code) {
+    const clean = code.trim().toUpperCase();
+    if (!clean) return;
+    const ticket = tickets.find(t => t.code === clean);
+    if (!ticket) {
+      setScanResult({
+        type: "error",
+        msg: "❌ 인식 실패 — 등록되지 않은 식권입니다",
+        code: clean
+      });
+      toast("미등록 식권: " + clean, "er");
+      setScanInput("");
+      return;
+    }
+    if (ticket.status === ST.USED) {
+      const w = wMap[ticket.workerId];
+      setScanResult({
+        type: "error",
+        msg: "⚠️ 이미 사용된 식권입니다 (" + (w ? w.name : "") + " · " + ticket.usedDate + ")",
+        code: clean
+      });
+      toast("이미 사용된 식권", "er");
+      setScanInput("");
+      return;
+    }
+    if (ticket.status === ST.EXPIRED) {
+      setScanResult({
+        type: "error",
+        msg: "⚠️ 유효기간 만료 식권입니다",
+        code: clean
+      });
+      toast("만료 식권", "er");
+      setScanInput("");
+      return;
+    }
+
+    // Process usage
+    const w = wMap[ticket.workerId];
+    const c = cMap[ticket.companyId];
+    setTickets(tickets.map(t => t.code === clean ? {
+      ...t,
+      status: ST.USED,
+      usedDate: TODAY,
+      usedRestaurant: scanRest,
+      usedFor: usageType,
+      scanMethod: scanMode
+    } : t));
+    const logItem = {
+      id: Date.now(),
+      code: clean,
+      worker: w ? w.name : "—",
+      company: c ? c.name : "—",
+      time: new Date().toLocaleTimeString("ko-KR"),
+      restaurant: scanRest,
+      usage: usageType,
+      method: scanMode
+    };
+    setScanLog(p => [logItem, ...p]);
+    setScanResult({
+      type: "ok",
+      msg: "✅ 사용처리 완료",
+      worker: w ? w.name : "",
+      company: c ? c.name : "",
+      code: clean,
+      ticketNo: ticket.ticketNo
+    });
+    toast((w ? w.name : "") + " 식권 스캔 완료", "sc");
+    setScanInput("");
+    if (inputRef.current) setTimeout(() => inputRef.current.focus(), 100);
+  }
+  function handleKeyDown(e) {
+    if (e.key === "Enter") {
+      processScan(scanInput);
+    }
+  }
+  const todayScans = scanLog.length;
+  const restInfo = REST.find(r => r.id === scanRest);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ph"
+  }, /*#__PURE__*/React.createElement("h2", null, "\uC2A4\uCE90\uB108 \u2014 ", restInfo ? restInfo.icon + " " + restInfo.name : ""), /*#__PURE__*/React.createElement("p", null, "\uBC14\uCF54\uB4DC/QR/NFC \uC790\uB3D9 \uC778\uC2DD \xB7 \uC624\uB298 \uC2A4\uCE94 ", todayScans, "\uAC74")), /*#__PURE__*/React.createElement("div", {
+    className: "scan-wrap"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "cd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ct"
+  }, "\uC624\uB298 \uC2A4\uCE94 \uB0B4\uC5ED"), scanLog.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: 24,
+      color: "var(--t3)",
+      fontSize: 12
+    }
+  }, "\uC544\uC9C1 \uC2A4\uCE94 \uB0B4\uC5ED\uC774 \uC5C6\uC2B5\uB2C8\uB2E4") : /*#__PURE__*/React.createElement("div", {
+    className: "scan-log"
+  }, scanLog.map(l => /*#__PURE__*/React.createElement("div", {
+    key: l.id,
+    className: "scan-log-item"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 600,
+      color: "var(--t1)",
+      marginRight: 8
+    }
+  }, l.worker), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "var(--t3)",
+      fontSize: 11
+    }
+  }, l.company), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "var(--t3)",
+      marginTop: 2
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "mf"
+  }, l.code), " \xB7 ", l.usage, " \xB7 ", l.method === "barcode" ? "📊" : l.method === "qr" ? "📱" : "💳")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "right"
+    }
+  }, /*#__PURE__*/React.createElement(RestChip, {
+    id: l.restaurant
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "mf",
+    style: {
+      fontSize: 10,
+      color: "var(--t3)",
+      marginTop: 2
+    }
+  }, l.time))))))), /*#__PURE__*/React.createElement("div", {
+    className: "scan-pos" + (scanResult && scanResult.type === "ok" ? " active" : "")
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      marginBottom: 4
+    }
+  }, "\uD83D\uDCE1 \uC2A4\uCE94 \uB300\uAE30\uC911"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--t3)"
+    }
+  }, "\uC2DD\uAD8C\uC744 \uC2A4\uCE90\uB108\uC5D0 \uC778\uC2DD\uC2DC\uCF1C\uC8FC\uC138\uC694")), /*#__PURE__*/React.createElement("div", {
+    className: "ct",
+    style: {
+      marginTop: 8
+    }
+  }, "\uD604\uC7AC \uC2DD\uB2F9"), /*#__PURE__*/React.createElement("div", {
+    className: "ig",
+    style: {
+      margin: "8px 0"
+    }
+  }, REST.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    className: "rcd" + (scanRest === r.id ? " sel" : ""),
+    onClick: () => setScanRest(r.id),
+    style: {
+      padding: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20
+    }
+  }, r.icon), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      fontWeight: 600,
+      marginTop: 3
+    }
+  }, r.name)))), /*#__PURE__*/React.createElement("div", {
+    className: "ct",
+    style: {
+      marginTop: 12
+    }
+  }, "\uC778\uC2DD \uBC29\uC2DD"), /*#__PURE__*/React.createElement("div", {
+    className: "scan-mode"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "scan-mode-btn" + (scanMode === "barcode" ? " on" : ""),
+    onClick: () => setScanMode("barcode")
+  }, "\uD83D\uDCCA \uBC14\uCF54\uB4DC"), /*#__PURE__*/React.createElement("div", {
+    className: "scan-mode-btn" + (scanMode === "qr" ? " on" : ""),
+    onClick: () => setScanMode("qr")
+  }, "\uD83D\uDCF1 QR"), /*#__PURE__*/React.createElement("div", {
+    className: "scan-mode-btn" + (scanMode === "nfc" ? " on" : ""),
+    onClick: () => setScanMode("nfc")
+  }, "\uD83D\uDCB3 NFC")), /*#__PURE__*/React.createElement("div", {
+    className: "ct",
+    style: {
+      marginTop: 12
+    }
+  }, "\uC0AC\uC6A9 \uC6A9\uB3C4"), /*#__PURE__*/React.createElement("select", {
+    className: "ip",
+    value: usageType,
+    onChange: e => setUsageType(e.target.value),
+    style: {
+      marginBottom: 12
+    }
+  }, USAGE.map(u => /*#__PURE__*/React.createElement("option", {
+    key: u,
+    value: u
+  }, u))), scanMode === "nfc" ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "nfc-ring"
+  }, "\uD83D\uDCB3"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--inf)",
+      marginTop: 4
+    }
+  }, "NFC \uCE74\uB4DC\uB97C \uD0DC\uADF8\uD558\uC138\uC694"), /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    style: {
+      marginTop: 12,
+      textAlign: "center"
+    },
+    placeholder: "NFC \uCF54\uB4DC \uC790\uB3D9 \uC785\uB825...",
+    value: scanInput,
+    onChange: e => setScanInput(e.target.value),
+    onKeyDown: handleKeyDown,
+    ref: inputRef
+  })) : /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("input", {
+    className: "scan-input",
+    ref: inputRef,
+    value: scanInput,
+    onChange: e => setScanInput(e.target.value),
+    onKeyDown: handleKeyDown,
+    placeholder: scanMode === "barcode" ? "바코드 스캔 대기..." : "QR 코드 스캔 대기...",
+    autoFocus: true
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      fontSize: 10,
+      color: "var(--t3)",
+      marginTop: 6
+    }
+  }, scanMode === "barcode" ? "USB 스캐너로 바코드를 스캔하면 자동 입력됩니다" : "모바일 카메라로 QR을 스캔하면 자동 입력됩니다")), scanResult && /*#__PURE__*/React.createElement("div", {
+    className: "scan-status " + (scanResult.type === "ok" ? "scan-ok" : "scan-er")
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      fontSize: 14
+    }
+  }, scanResult.msg), scanResult.type === "ok" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 6,
+      fontSize: 12
+    }
+  }, scanResult.worker, " \xB7 ", scanResult.company, " \xB7 \uC2DD\uAD8C ", scanResult.ticketNo, "/3", /*#__PURE__*/React.createElement("div", {
+    className: "mf",
+    style: {
+      marginTop: 3,
+      fontSize: 11
+    }
+  }, scanResult.code)), scanResult.type === "error" && scanResult.code && /*#__PURE__*/React.createElement("div", {
+    className: "mf",
+    style: {
+      marginTop: 4,
+      fontSize: 11
+    }
+  }, scanResult.code)))));
+}
+
+// ═══ 미사용 관리 ═══
+function Unused({
+  tickets,
+  wMap,
+  cMap
+}) {
+  const [fE, setFE] = useState("all");
+  const [fC, setFC] = useState("");
+  const unused = tickets.filter(t => t.status === ST.UNUSED);
+  const filtered = unused.filter(t => {
+    if (fC && t.companyId !== fC) return false;
+    const dl = dLeft(t.expiryDate);
+    if (fE === "cr" && dl > 14) return false;
+    if (fE === "wr" && (dl <= 14 || dl > 30)) return false;
+    if (fE === "sf" && dl <= 30) return false;
+    return true;
+  });
+  const cr = unused.filter(t => dLeft(t.expiryDate) <= 14).length;
+  const wr = unused.filter(t => {
+    const d = dLeft(t.expiryDate);
+    return d > 14 && d <= 30;
+  }).length;
+  const sf = unused.filter(t => dLeft(t.expiryDate) > 30).length;
+  const cids = [...new Set(unused.map(t => t.companyId))];
+  if (unused.length === 0) return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ph"
+  }, /*#__PURE__*/React.createElement("h2", null, "\uBBF8\uC0AC\uC6A9 \uC2DD\uAD8C \uAD00\uB9AC")), /*#__PURE__*/React.createElement("div", {
+    className: "em"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "emi"
+  }, "\uD83D\uDCCB"), /*#__PURE__*/React.createElement("p", null, "\uBBF8\uC0AC\uC6A9 \uC2DD\uAD8C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.")));
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ph"
+  }, /*#__PURE__*/React.createElement("h2", null, "\uBBF8\uC0AC\uC6A9 \uC2DD\uAD8C \uAD00\uB9AC"), /*#__PURE__*/React.createElement("p", null, "3\uAC1C\uC6D4 \uC720\uD6A8 \xB7 \uCD1D ", unused.length, "\uC7A5")), /*#__PURE__*/React.createElement("div", {
+    className: "sg"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sc",
+    style: {
+      borderColor: fE === "cr" ? "var(--err)" : undefined
+    },
+    onClick: () => setFE(fE === "cr" ? "all" : "cr")
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sl",
+    style: {
+      color: "var(--err)"
+    }
+  }, "\u26A0 \uB9CC\uB8CC\uC784\uBC15 (14\uC77C)"), /*#__PURE__*/React.createElement("div", {
+    className: "sv",
+    style: {
+      color: "var(--err)"
+    }
+  }, cr)), /*#__PURE__*/React.createElement("div", {
+    className: "sc",
+    style: {
+      borderColor: fE === "wr" ? "var(--wrn)" : undefined
+    },
+    onClick: () => setFE(fE === "wr" ? "all" : "wr")
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sl",
+    style: {
+      color: "var(--wrn)"
+    }
+  }, "\uC8FC\uC758 (15~30\uC77C)"), /*#__PURE__*/React.createElement("div", {
+    className: "sv",
+    style: {
+      color: "var(--wrn)"
+    }
+  }, wr)), /*#__PURE__*/React.createElement("div", {
+    className: "sc",
+    style: {
+      borderColor: fE === "sf" ? "var(--ok)" : undefined
+    },
+    onClick: () => setFE(fE === "sf" ? "all" : "sf")
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "sl",
+    style: {
+      color: "var(--ok)"
+    }
+  }, "\uC548\uC804 (30\uC77C+)"), /*#__PURE__*/React.createElement("div", {
+    className: "sv",
+    style: {
+      color: "var(--ok)"
+    }
+  }, sf))), /*#__PURE__*/React.createElement("div", {
+    className: "fb"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "ip",
+    style: {
+      width: 140
+    },
+    value: fC,
+    onChange: e => setFC(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\uC804\uCCB4 \uACE0\uAC1D\uC0AC"), cids.map(id => /*#__PURE__*/React.createElement("option", {
+    key: id,
+    value: id
+  }, cMap[id] ? cMap[id].name : id))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: "var(--t3)"
+    }
+  }, "\uCD1D ", filtered.length, "\uC7A5")), /*#__PURE__*/React.createElement("div", {
+    className: "cd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "tw sy"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "\uBC14\uCF54\uB4DC"), /*#__PURE__*/React.createElement("th", null, "\uADFC\uB85C\uC790"), /*#__PURE__*/React.createElement("th", null, "\uC18C\uC18D"), /*#__PURE__*/React.createElement("th", null, "\uBC1C\uAD8C\uC77C"), /*#__PURE__*/React.createElement("th", null, "\uBC1C\uAD8C\uC2DD\uB2F9"), /*#__PURE__*/React.createElement("th", null, "\uB9CC\uB8CC\uC77C"), /*#__PURE__*/React.createElement("th", null, "\uC794\uC5EC"))), /*#__PURE__*/React.createElement("tbody", null, filtered.slice(0, 100).map(t => {
+    const w = wMap[t.workerId];
+    return /*#__PURE__*/React.createElement("tr", {
+      key: t.id
+    }, /*#__PURE__*/React.createElement("td", {
+      className: "mf",
+      style: {
+        color: "var(--acc)"
+      }
+    }, t.code), /*#__PURE__*/React.createElement("td", {
+      style: {
+        fontWeight: 500,
+        color: "var(--t1)"
+      }
+    }, w ? w.name : "—"), /*#__PURE__*/React.createElement("td", null, cMap[t.companyId] ? cMap[t.companyId].name : "—"), /*#__PURE__*/React.createElement("td", {
+      className: "mf"
+    }, t.issuedDate), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(RestChip, {
+      id: t.issuedRestaurant
+    })), /*#__PURE__*/React.createElement("td", {
+      className: "mf"
+    }, t.expiryDate), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(ExpiryBar, {
+      d: t.expiryDate
+    })));
+  }))))));
+}
+
+// ═══ 정산/청구 (세부내역서 + 집계표) ═══
+function Billing({
+  tickets,
+  companies,
+  workers,
+  wMap,
+  cMap,
+  toast
+}) {
+  const [bm, setBm] = useState(moOf(TODAY));
+  const [viewMode, setViewMode] = useState("summary"); // summary | detail | aggregate
+  const [selCompany, setSelCompany] = useState("");
+  const printRef = useRef(null);
+  const mt = tickets.filter(t => moOf(t.issuedDate) === bm);
+  const bd = companies.filter(c => c.active).map(c => {
+    const ct = mt.filter(t => t.companyId === c.id);
+    const issued = ct.length,
+      used = ct.filter(t => t.status === ST.USED).length,
+      unused = ct.filter(t => t.status === ST.UNUSED).length;
+    const amt = issued * c.pricePerMeal,
+      unusedAmt = unused * c.pricePerMeal;
+    return {
+      ...c,
+      issued,
+      used,
+      unused,
+      amt,
+      unusedAmt
+    };
+  });
+  const totalAmt = bd.reduce((s, b) => s + b.amt, 0);
+  const totalI = bd.reduce((s, b) => s + b.issued, 0);
+  const totalUsed = bd.reduce((s, b) => s + b.used, 0);
+  const totalUnused = bd.reduce((s, b) => s + b.unused, 0);
+  const totalUnusedAmt = bd.reduce((s, b) => s + b.unusedAmt, 0);
+
+  // 세부내역서: 근로자 1명×일자 = 1건 (3장 통합), 고객사 제출용 (사용상태 무관)
+  const detailCompany = selCompany ? companies.find(c => c.id === selCompany) : null;
+  const detailTickets = selCompany ? mt.filter(t => t.companyId === selCompany).sort((a, b) => a.issuedDate.localeCompare(b.issuedDate) || a.workerId.localeCompare(b.workerId)) : [];
+
+  // 근로자+일자별 그룹핑 (1명 = 3장 = 1건)
+  const detailGrouped = useMemo(() => {
+    const map = {};
+    detailTickets.forEach(t => {
+      const key = t.issuedDate + "_" + t.workerId;
+      if (!map[key]) {
+        const w = wMap[t.workerId];
+        map[key] = {
+          key,
+          date: t.issuedDate,
+          workerId: t.workerId,
+          workerName: w ? w.name : "—",
+          restaurant: t.issuedRestaurant,
+          qty: 0
+        };
+      }
+      map[key].qty++;
+    });
+    return Object.values(map).sort((a, b) => a.date.localeCompare(b.date) || a.workerName.localeCompare(b.workerName));
+  }, [detailTickets, wMap]);
+  const detailTotalPersons = detailGrouped.length;
+  const detailTotalTickets = detailGrouped.reduce((s, r) => s + r.qty, 0);
+  const pricePerMeal = detailCompany ? detailCompany.pricePerMeal : 0;
+  const pricePerPerson = pricePerMeal * 3; // 1인 3장
+
+  // 집계표: 일자별 발권 수량
+  const aggregateByDate = {};
+  if (selCompany) {
+    detailTickets.forEach(t => {
+      if (!aggregateByDate[t.issuedDate]) aggregateByDate[t.issuedDate] = {
+        date: t.issuedDate,
+        count: 0,
+        workers: new Set(),
+        used: 0,
+        unused: 0
+      };
+      aggregateByDate[t.issuedDate].count++;
+      aggregateByDate[t.issuedDate].workers.add(t.workerId);
+      if (t.status === ST.USED) aggregateByDate[t.issuedDate].used++;else aggregateByDate[t.issuedDate].unused++;
+    });
+  }
+  const aggRows = Object.values(aggregateByDate).sort((a, b) => a.date.localeCompare(b.date));
+  const aggTotalCount = aggRows.reduce((s, r) => s + r.count, 0);
+  const aggTotalWorkers = new Set(detailTickets.map(t => t.workerId)).size;
+  const aggTotalUsed = aggRows.reduce((s, r) => s + r.used, 0);
+  const aggTotalUnused = aggRows.reduce((s, r) => s + r.unused, 0);
+  function exportCSV() {
+    try {
+      const rows = [["고객사명", "발권수", "사용", "미사용", "단가", "청구금액", "미사용금액"], ...bd.map(b => [b.name, b.issued, b.used, b.unused, b.pricePerMeal, b.amt, b.unusedAmt]), ["합계", totalI, totalUsed, totalUnused, "", totalAmt, totalUnusedAmt]];
+      const csvStr = "\uFEFF" + rows.map(r => r.join(",")).join("\n");
+      const blob = new Blob([csvStr], {
+        type: "text/csv;charset=utf-8;"
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "유림푸드_정산_" + bm + ".csv";
+      link.click();
+      URL.revokeObjectURL(url);
+      toast("엑셀 다운로드 완료");
+    } catch (e) {
+      toast("다운로드 실패", "er");
+    }
+  }
+  function exportDetailCSV() {
+    if (!detailCompany) return;
+    try {
+      const rows = [["식권 발권 세부내역서"], ["공급자: 유림푸드 · SK하이닉스 용인사업장"], ["고객사: " + detailCompany.name + " · 청구기간: " + bm + " · 단가: " + pricePerMeal + "원/장"], [], ["No", "발권일자", "근로자", "수량(장)", "단가(원)", "금액(원)"]];
+      detailGrouped.forEach((r, i) => {
+        rows.push([i + 1, r.date, r.workerName, r.qty, pricePerMeal, r.qty * pricePerMeal]);
+      });
+      rows.push([]);
+      rows.push(["합계", "", detailTotalPersons + "명", detailTotalTickets + "장", "", detailTotalTickets * pricePerMeal]);
+      const csvStr = "\uFEFF" + rows.map(r => r.join(",")).join("\n");
+      const blob = new Blob([csvStr], {
+        type: "text/csv;charset=utf-8;"
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "유림푸드_세부내역서_" + detailCompany.name + "_" + bm + ".csv";
+      link.click();
+      URL.revokeObjectURL(url);
+      toast("세부내역서 다운로드 완료");
+    } catch (e) {
+      toast("다운로드 실패", "er");
+    }
+  }
+  function exportAggCSV() {
+    if (!detailCompany) return;
+    try {
+      const rows = [["유림푸드 집계표 — " + detailCompany.name + " — " + bm], [], ["일자", "발권인원", "발권수량", "사용", "미사용", "단가", "금액"]];
+      aggRows.forEach(r => {
+        rows.push([r.date, r.workers.size + "명", r.count + "장", r.used, r.unused, pricePerMeal, r.count * pricePerMeal]);
+      });
+      rows.push([]);
+      rows.push(["합계", aggTotalWorkers + "명", aggTotalCount + "장", aggTotalUsed, aggTotalUnused, "", aggTotalCount * pricePerMeal]);
+      const csvStr = "\uFEFF" + rows.map(r => r.join(",")).join("\n");
+      const blob = new Blob([csvStr], {
+        type: "text/csv;charset=utf-8;"
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "유림푸드_집계표_" + detailCompany.name + "_" + bm + ".csv";
+      link.click();
+      URL.revokeObjectURL(url);
+      toast("집계표 다운로드 완료");
+    } catch (e) {
+      toast("다운로드 실패", "er");
+    }
+  }
+  function doPrint() {
+    window.print();
+  }
+  if (totalI === 0 && viewMode === "summary") return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ph"
+  }, /*#__PURE__*/React.createElement("h2", null, "\uC815\uC0B0 / \uCCAD\uAD6C"), /*#__PURE__*/React.createElement("p", null, "\uBC1C\uAD8C \uAE30\uC900 \uC6D4\uBCC4 \uCCAD\uAD6C")), /*#__PURE__*/React.createElement("div", {
+    className: "fb"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    type: "month",
+    style: {
+      width: 170
+    },
+    value: bm,
+    onChange: e => setBm(e.target.value)
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "em"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "emi"
+  }, "\uD83D\uDCB0"), /*#__PURE__*/React.createElement("p", null, bm, " \uBC1C\uAD8C \uB0B4\uC5ED \uC5C6\uC74C")));
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "ph"
+  }, /*#__PURE__*/React.createElement("h2", null, "\uC815\uC0B0 / \uCCAD\uAD6C"), /*#__PURE__*/React.createElement("p", null, "\uBC1C\uAD8C \uAE30\uC900 \uC6D4\uBCC4 \uCCAD\uAD6C \xB7 \uC0AC\uC6A9 \uC5EC\uBD80 \uBB34\uAD00 \xB7 \uC775\uC6D4 \uCCAD\uAD6C")), /*#__PURE__*/React.createElement("div", {
+    className: "fb"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "ip",
+    type: "month",
+    style: {
+      width: 170
+    },
+    value: bm,
+    onChange: e => {
+      setBm(e.target.value);
+      setSelCompany("");
+      setViewMode("summary");
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      background: "var(--bg1)",
+      borderRadius: "var(--rs)",
+      padding: 3,
+      border: "1px solid var(--bd)"
+    }
+  }, [["summary", "📊 전체 현황"], ["detail", "📝 세부내역서"], ["aggregate", "📋 집계표"]].map(([k, l]) => /*#__PURE__*/React.createElement("button", {
+    key: k,
+    className: "bt bt-s" + (viewMode === k ? " bt-a" : ""),
+    onClick: () => setViewMode(k),
+    style: {
+      border: "none"
+    }
+  }, l))), viewMode === "summary" && /*#__PURE__*/React.createElement("button", {
+    className: "bt",
+    onClick: exportCSV
+  }, "\uD83D\uDCE5 \uC804\uCCB4 \uC5D1\uC140")), (viewMode === "detail" || viewMode === "aggregate") && /*#__PURE__*/React.createElement("div", {
+    className: "fb"
+  }, /*#__PURE__*/React.createElement("select", {
+    className: "ip",
+    style: {
+      width: 200
+    },
+    value: selCompany,
+    onChange: e => setSelCompany(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\u2014 \uACE0\uAC1D\uC0AC\uB97C \uC120\uD0DD\uD558\uC138\uC694 \u2014"), bd.filter(b => b.issued > 0).map(b => /*#__PURE__*/React.createElement("option", {
+    key: b.id,
+    value: b.id
+  }, b.name, " (", b.issued, "\uC7A5 / ", b.amt.toLocaleString(), "\uC6D0)"))), selCompany && viewMode === "detail" && /*#__PURE__*/React.createElement("button", {
+    className: "bt",
+    onClick: exportDetailCSV
+  }, "\uD83D\uDCE5 \uC138\uBD80\uB0B4\uC5ED\uC11C \uC5D1\uC140"), selCompany && viewMode === "aggregate" && /*#__PURE__*/React.createElement("button", {
+    className: "bt",
+    onClick: exportAggCSV
+  }, "\uD83D\uDCE5 \uC9D1\uACC4\uD45C \uC5D1\uC140"), selCompany && /*#__PURE__*/React.createElement("button", {
+    className: "bt",
+    onClick: doPrint
+  }, "\uD83D\uDDA8\uFE0F \uC778\uC1C4")), viewMode === "summary" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 300px",
+      gap: 14,
+      alignItems: "start"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "cd"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ct"
+  }, "\uACE0\uAC1D\uC0AC\uBCC4 \uCCAD\uAD6C \uB0B4\uC5ED"), /*#__PURE__*/React.createElement("div", {
+    className: "tw"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "\uACE0\uAC1D\uC0AC"), /*#__PURE__*/React.createElement("th", null, "\uBC1C\uAD8C\uC218"), /*#__PURE__*/React.createElement("th", null, "\uC0AC\uC6A9"), /*#__PURE__*/React.createElement("th", null, "\uBBF8\uC0AC\uC6A9"), /*#__PURE__*/React.createElement("th", null, "\uB2E8\uAC00"), /*#__PURE__*/React.createElement("th", null, "\uCCAD\uAD6C\uAE08\uC561"), /*#__PURE__*/React.createElement("th", null, "\uBBF8\uC0AC\uC6A9\uAE08\uC561"), /*#__PURE__*/React.createElement("th", null, "\uB0B4\uC5ED"))), /*#__PURE__*/React.createElement("tbody", null, bd.map(b => /*#__PURE__*/React.createElement("tr", {
+    key: b.id
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 600,
+      color: "var(--t1)"
+    }
+  }, b.name), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, b.issued, "\uC7A5"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      color: "var(--ok)"
+    }
+  }, b.used), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      color: "var(--acc)"
+    }
+  }, b.unused), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, b.pricePerMeal.toLocaleString(), "\uC6D0"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600,
+      color: "var(--t1)"
+    }
+  }, b.amt.toLocaleString(), "\uC6D0"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      color: "var(--wrn)"
+    }
+  }, b.unusedAmt.toLocaleString(), "\uC6D0"), /*#__PURE__*/React.createElement("td", null, b.issued > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "acts"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-s",
+    onClick: () => {
+      setSelCompany(b.id);
+      setViewMode("detail");
+    }
+  }, "\uC138\uBD80"), /*#__PURE__*/React.createElement("button", {
+    className: "bt bt-s",
+    onClick: () => {
+      setSelCompany(b.id);
+      setViewMode("aggregate");
+    }
+  }, "\uC9D1\uACC4"))))), /*#__PURE__*/React.createElement("tr", {
+    style: {
+      background: "var(--bg1)"
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 700,
+      color: "var(--acc)"
+    }
+  }, "\uD569\uACC4"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600
+    }
+  }, totalI, "\uC7A5"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600,
+      color: "var(--ok)"
+    }
+  }, totalUsed), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600,
+      color: "var(--acc)"
+    }
+  }, totalUnused), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 700,
+      color: "var(--acc)",
+      fontSize: 13
+    }
+  }, totalAmt.toLocaleString(), "\uC6D0"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 700,
+      color: "var(--wrn)",
+      fontSize: 13
+    }
+  }, totalUnusedAmt.toLocaleString(), "\uC6D0"), /*#__PURE__*/React.createElement("td", null)))))), /*#__PURE__*/React.createElement("div", {
+    className: "cd",
+    style: {
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "ct"
+  }, "\uCD1D \uCCAD\uAD6C \uAE08\uC561"), /*#__PURE__*/React.createElement("div", {
+    className: "btt"
+  }, totalAmt.toLocaleString()), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--t3)",
+      marginTop: 3
+    }
+  }, "\uC6D0 (VAT \uBCC4\uB3C4)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 16,
+      padding: 12,
+      background: "var(--wrns)",
+      borderRadius: "var(--rs)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      fontWeight: 600,
+      color: "var(--wrn)",
+      marginBottom: 4
+    }
+  }, "\uBBF8\uC0AC\uC6A9 \uAE08\uC561 \uD569\uACC4"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: "'JetBrains Mono',monospace",
+      fontSize: 20,
+      fontWeight: 600,
+      color: "var(--wrn)"
+    }
+  }, totalUnusedAmt.toLocaleString(), "\uC6D0"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "var(--wrn)",
+      marginTop: 2
+    }
+  }, totalUnused, "\uC7A5")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14,
+      textAlign: "left"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      fontWeight: 600,
+      color: "var(--t3)",
+      marginBottom: 6
+    }
+  }, "\uACE0\uAC1D\uC0AC\uBCC4 \uCCAD\uAD6C"), bd.filter(b => b.amt > 0).map(b => /*#__PURE__*/React.createElement("div", {
+    className: "bdi",
+    key: b.id
+  }, /*#__PURE__*/React.createElement("span", null, b.name), /*#__PURE__*/React.createElement("span", {
+    className: "mf",
+    style: {
+      color: "var(--t1)"
+    }
+  }, b.amt.toLocaleString(), "\uC6D0")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14,
+      padding: 10,
+      background: "var(--accs)",
+      borderRadius: "var(--rs)",
+      fontSize: 11,
+      color: "var(--acc)"
+    }
+  }, "\uD83D\uDCA1 \uBC1C\uAD8C \uAE30\uC900 \uCCAD\uAD6C \u2014 \uC0AC\uC6A9 \uC5EC\uBD80 \uBB34\uAD00"))), viewMode === "detail" && !selCompany && /*#__PURE__*/React.createElement("div", {
+    className: "em"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "emi"
+  }, "\uD83D\uDCDD"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13
+    }
+  }, "\uC138\uBD80\uB0B4\uC5ED\uC11C\uB97C \uCD9C\uB825\uD560 \uACE0\uAC1D\uC0AC\uB97C \uC120\uD0DD\uD558\uC138\uC694.")), viewMode === "detail" && selCompany && detailCompany && /*#__PURE__*/React.createElement("div", {
+    ref: printRef
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "print-doc",
+    style: {
+      background: "var(--bg2)",
+      border: "1px solid var(--bd)",
+      borderRadius: "var(--r)",
+      padding: 24
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      marginBottom: 24,
+      paddingBottom: 16,
+      borderBottom: "2px solid var(--bd)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 900,
+      color: "var(--acc)",
+      marginBottom: 4
+    }
+  }, "\uC2DD\uAD8C \uBC1C\uAD8C \uC138\uBD80\uB0B4\uC5ED\uC11C"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "var(--t2)"
+    }
+  }, "\uC720\uB9BC\uD478\uB4DC \xB7 SK\uD558\uC774\uB2C9\uC2A4 \uC6A9\uC778\uC0AC\uC5C5\uC7A5")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 16,
+      marginBottom: 20,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "var(--t3)",
+      fontSize: 11,
+      marginBottom: 4
+    }
+  }, "\uACE0\uAC1D\uC0AC"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      fontSize: 16
+    }
+  }, detailCompany.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "var(--t2)",
+      fontSize: 12,
+      marginTop: 2
+    }
+  }, "\uB2F4\uB2F9: ", detailCompany.contact, " \xB7 ", detailCompany.phone)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "right"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "var(--t3)",
+      fontSize: 11,
+      marginBottom: 4
+    }
+  }, "\uCCAD\uAD6C\uAE30\uAC04"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      fontSize: 16
+    }
+  }, bm), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "var(--t2)",
+      fontSize: 12,
+      marginTop: 2
+    }
+  }, "\uB2E8\uAC00: ", pricePerMeal.toLocaleString(), "\uC6D0/\uC7A5 \xB7 1\uC778: ", pricePerPerson.toLocaleString(), "\uC6D0/\uC77C(3\uC7A5)"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(3,1fr)",
+      gap: 10,
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "var(--bg1)",
+      borderRadius: "var(--rs)",
+      padding: 12,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "var(--t3)"
+    }
+  }, "\uBC1C\uAD8C\uC778\uC6D0(\uC5F0\uC778\uC6D0)"), /*#__PURE__*/React.createElement("div", {
+    className: "mf",
+    style: {
+      fontSize: 20,
+      fontWeight: 600,
+      color: "var(--t1)",
+      marginTop: 2
+    }
+  }, detailTotalPersons, "\uBA85")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "var(--bg1)",
+      borderRadius: "var(--rs)",
+      padding: 12,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "var(--t3)"
+    }
+  }, "\uBC1C\uAD8C\uC218\uB7C9"), /*#__PURE__*/React.createElement("div", {
+    className: "mf",
+    style: {
+      fontSize: 20,
+      fontWeight: 600,
+      color: "var(--acc)",
+      marginTop: 2
+    }
+  }, detailTotalTickets, "\uC7A5")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "var(--accs)",
+      borderRadius: "var(--rs)",
+      padding: 12,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "var(--acc)",
+      fontWeight: 600
+    }
+  }, "\uCCAD\uAD6C\uAE08\uC561"), /*#__PURE__*/React.createElement("div", {
+    className: "mf",
+    style: {
+      fontSize: 20,
+      fontWeight: 700,
+      color: "var(--acc)",
+      marginTop: 2
+    }
+  }, (detailTotalTickets * pricePerMeal).toLocaleString(), "\uC6D0"))), /*#__PURE__*/React.createElement("div", {
+    className: "tw sy"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "No"), /*#__PURE__*/React.createElement("th", null, "\uBC1C\uAD8C\uC77C\uC790"), /*#__PURE__*/React.createElement("th", null, "\uADFC\uB85C\uC790"), /*#__PURE__*/React.createElement("th", null, "\uC218\uB7C9"), /*#__PURE__*/React.createElement("th", null, "\uB2E8\uAC00"), /*#__PURE__*/React.createElement("th", null, "\uAE08\uC561"))), /*#__PURE__*/React.createElement("tbody", null, detailGrouped.map((r, i) => /*#__PURE__*/React.createElement("tr", {
+    key: r.key
+  }, /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, i + 1), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, r.date), /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 500,
+      color: "var(--t1)"
+    }
+  }, r.workerName), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, r.qty, "\uC7A5"), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, pricePerMeal.toLocaleString(), "\uC6D0"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600,
+      color: "var(--t1)"
+    }
+  }, (r.qty * pricePerMeal).toLocaleString(), "\uC6D0"))), /*#__PURE__*/React.createElement("tr", {
+    style: {
+      background: "var(--bg1)"
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    colSpan: 2,
+    style: {
+      fontWeight: 700,
+      color: "var(--acc)"
+    }
+  }, "\uD569\uACC4"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600
+    }
+  }, detailTotalPersons, "\uBA85"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600
+    }
+  }, detailTotalTickets, "\uC7A5"), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 700,
+      color: "var(--acc)",
+      fontSize: 14
+    }
+  }, (detailTotalTickets * pricePerMeal).toLocaleString(), "\uC6D0"))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 16,
+      padding: 10,
+      background: "var(--accs)",
+      borderRadius: "var(--rs)",
+      fontSize: 11,
+      color: "var(--acc)",
+      textAlign: "center"
+    }
+  }, "\u203B 1\uC778 1\uC77C 3\uC7A5 \uBC1C\uAD8C \uAE30\uC900 \xB7 \uBC1C\uAD8C \uAE30\uC900 \uCCAD\uAD6C (\uC0AC\uC6A9 \uC5EC\uBD80 \uBB34\uAD00)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 40,
+      marginTop: 32,
+      paddingTop: 20,
+      borderTop: "1px solid var(--bd)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--t3)",
+      marginBottom: 40
+    }
+  }, "\uACF5\uAE09\uC790 (\uC720\uB9BC\uD478\uB4DC)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: "1px solid var(--bdl)",
+      paddingTop: 8,
+      fontSize: 11,
+      color: "var(--t3)"
+    }
+  }, "\uC11C\uBA85 / \uC9C1\uC778")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--t3)",
+      marginBottom: 40
+    }
+  }, "\uACE0\uAC1D\uC0AC (", detailCompany.name, ")"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: "1px solid var(--bdl)",
+      paddingTop: 8,
+      fontSize: 11,
+      color: "var(--t3)"
+    }
+  }, "\uC11C\uBA85 / \uC9C1\uC778"))))), viewMode === "aggregate" && !selCompany && /*#__PURE__*/React.createElement("div", {
+    className: "em"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "emi"
+  }, "\uD83D\uDCCB"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      fontSize: 13
+    }
+  }, "\uC9D1\uACC4\uD45C\uB97C \uCD9C\uB825\uD560 \uACE0\uAC1D\uC0AC\uB97C \uC120\uD0DD\uD558\uC138\uC694.")), viewMode === "aggregate" && selCompany && detailCompany && /*#__PURE__*/React.createElement("div", {
+    ref: printRef
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "print-doc",
+    style: {
+      background: "var(--bg2)",
+      border: "1px solid var(--bd)",
+      borderRadius: "var(--r)",
+      padding: 24
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      marginBottom: 24,
+      paddingBottom: 16,
+      borderBottom: "2px solid var(--bd)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 900,
+      color: "var(--acc)",
+      marginBottom: 4
+    }
+  }, "\uC2DD\uAD8C \uBC1C\uAD8C \uC9D1\uACC4\uD45C"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "var(--t2)"
+    }
+  }, "\uC720\uB9BC\uD478\uB4DC \xB7 SK\uD558\uC774\uB2C9\uC2A4 \uC6A9\uC778\uC0AC\uC5C5\uC7A5")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 16,
+      marginBottom: 20,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "var(--t3)",
+      fontSize: 11,
+      marginBottom: 4
+    }
+  }, "\uACE0\uAC1D\uC0AC"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      fontSize: 16
+    }
+  }, detailCompany.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "var(--t2)",
+      fontSize: 12,
+      marginTop: 2
+    }
+  }, "\uB2F4\uB2F9: ", detailCompany.contact)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "right"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "var(--t3)",
+      fontSize: 11,
+      marginBottom: 4
+    }
+  }, "\uCCAD\uAD6C\uAE30\uAC04"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      fontSize: 16
+    }
+  }, bm), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "var(--t2)",
+      fontSize: 12,
+      marginTop: 2
+    }
+  }, "\uB2E8\uAC00: ", pricePerMeal.toLocaleString(), "\uC6D0 / \uC7A5"))), /*#__PURE__*/React.createElement("div", {
+    className: "tw"
+  }, /*#__PURE__*/React.createElement("table", null, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", null, "\uC77C\uC790"), /*#__PURE__*/React.createElement("th", null, "\uBC1C\uAD8C\uC778\uC6D0"), /*#__PURE__*/React.createElement("th", null, "\uBC1C\uAD8C\uC218\uB7C9"), /*#__PURE__*/React.createElement("th", null, "\uC0AC\uC6A9"), /*#__PURE__*/React.createElement("th", null, "\uBBF8\uC0AC\uC6A9"), /*#__PURE__*/React.createElement("th", null, "\uB2E8\uAC00"), /*#__PURE__*/React.createElement("th", null, "\uAE08\uC561"))), /*#__PURE__*/React.createElement("tbody", null, aggRows.map(r => /*#__PURE__*/React.createElement("tr", {
+    key: r.date
+  }, /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, r.date), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, r.workers.size, "\uBA85"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 500,
+      color: "var(--t1)"
+    }
+  }, r.count, "\uC7A5"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      color: "var(--ok)"
+    }
+  }, r.used), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      color: "var(--acc)"
+    }
+  }, r.unused), /*#__PURE__*/React.createElement("td", {
+    className: "mf"
+  }, pricePerMeal.toLocaleString()), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600,
+      color: "var(--t1)"
+    }
+  }, (r.count * pricePerMeal).toLocaleString(), "\uC6D0"))), /*#__PURE__*/React.createElement("tr", {
+    style: {
+      background: "var(--bg1)"
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      fontWeight: 700,
+      color: "var(--acc)"
+    }
+  }, "\uD569\uACC4"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600
+    }
+  }, aggTotalWorkers, "\uBA85"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 700,
+      color: "var(--acc)"
+    }
+  }, aggTotalCount, "\uC7A5"), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600,
+      color: "var(--ok)"
+    }
+  }, aggTotalUsed), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 600,
+      color: "var(--acc)"
+    }
+  }, aggTotalUnused), /*#__PURE__*/React.createElement("td", null), /*#__PURE__*/React.createElement("td", {
+    className: "mf",
+    style: {
+      fontWeight: 700,
+      color: "var(--acc)",
+      fontSize: 14
+    }
+  }, (aggTotalCount * pricePerMeal).toLocaleString(), "\uC6D0"))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 12,
+      marginTop: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "var(--accs)",
+      borderRadius: "var(--rs)",
+      padding: 14,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "var(--acc)",
+      fontWeight: 600
+    }
+  }, "\uCD1D \uCCAD\uAD6C\uAE08\uC561"), /*#__PURE__*/React.createElement("div", {
+    className: "mf",
+    style: {
+      fontSize: 22,
+      fontWeight: 700,
+      color: "var(--acc)",
+      marginTop: 4
+    }
+  }, (aggTotalCount * pricePerMeal).toLocaleString(), "\uC6D0")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "var(--oks)",
+      borderRadius: "var(--rs)",
+      padding: 14,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "var(--ok)",
+      fontWeight: 600
+    }
+  }, "\uC0AC\uC6A9\uAE08\uC561"), /*#__PURE__*/React.createElement("div", {
+    className: "mf",
+    style: {
+      fontSize: 22,
+      fontWeight: 700,
+      color: "var(--ok)",
+      marginTop: 4
+    }
+  }, (aggTotalUsed * pricePerMeal).toLocaleString(), "\uC6D0")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "var(--wrns)",
+      borderRadius: "var(--rs)",
+      padding: 14,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "var(--wrn)",
+      fontWeight: 600
+    }
+  }, "\uBBF8\uC0AC\uC6A9\uAE08\uC561"), /*#__PURE__*/React.createElement("div", {
+    className: "mf",
+    style: {
+      fontSize: 22,
+      fontWeight: 700,
+      color: "var(--wrn)",
+      marginTop: 4
+    }
+  }, (aggTotalUnused * pricePerMeal).toLocaleString(), "\uC6D0"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 40,
+      marginTop: 32,
+      paddingTop: 20,
+      borderTop: "1px solid var(--bd)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--t3)",
+      marginBottom: 40
+    }
+  }, "\uACF5\uAE09\uC790 (\uC720\uB9BC\uD478\uB4DC)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: "1px solid var(--bdl)",
+      paddingTop: 8,
+      fontSize: 11,
+      color: "var(--t3)"
+    }
+  }, "\uC11C\uBA85 / \uC9C1\uC778")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "var(--t3)",
+      marginBottom: 40
+    }
+  }, "\uACE0\uAC1D\uC0AC (", detailCompany.name, ")"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: "1px solid var(--bdl)",
+      paddingTop: 8,
+      fontSize: 11,
+      color: "var(--t3)"
+    }
+  }, "\uC11C\uBA85 / \uC9C1\uC778"))))));
+}
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+</script>
+</body>
+</html>
